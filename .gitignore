@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+backend/boto3/
+backend/botocore/
+backend/aws_lambda_powertools/
+backend/pydantic*
+
+# Build outputs
+frontend/dist/
+frontend/.vite/
+.aws-sam/
+.build/
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+*.pem
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# AWS
+samconfig.toml
+
+# Misc
+.cache/
+*.bak
