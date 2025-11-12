@@ -1,0 +1,158 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AWS_REGION: eu-west-1
+  STACK_NAME: totally-rad-chatbot-9000
+
+jobs:
+  deploy:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install AWS SAM CLI
+        uses: aws-actions/setup-sam@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install backend dependencies
+        run: |
+          pip install -r backend/requirements.txt -t backend/ --upgrade
+
+      - name: Create S3 bucket for artifacts
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          aws s3 mb s3://${STACK_NAME}-artifacts-${ACCOUNT_ID} --region ${AWS_REGION} 2>/dev/null || echo "Bucket already exists"
+
+      - name: Build SAM application
+        run: sam build
+
+      - name: Deploy SAM application
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          sam deploy \
+            --stack-name ${STACK_NAME} \
+            --s3-bucket ${STACK_NAME}-artifacts-${ACCOUNT_ID} \
+            --capabilities CAPABILITY_IAM \
+            --region ${AWS_REGION} \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides Environment=prod
+
+      - name: Get stack outputs
+        id: stack-outputs
+        run: |
+          API_ENDPOINT=$(aws cloudformation describe-stacks \
+            --stack-name ${STACK_NAME} \
+            --region ${AWS_REGION} \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
+            --output text)
+
+          USER_POOL_ID=$(aws cloudformation describe-stacks \
+            --stack-name ${STACK_NAME} \
+            --region ${AWS_REGION} \
+            --query "Stacks[0].Outputs[?OutputKey=='UserPoolId'].OutputValue" \
+            --output text)
+
+          USER_POOL_CLIENT_ID=$(aws cloudformation describe-stacks \
+            --stack-name ${STACK_NAME} \
+            --region ${AWS_REGION} \
+            --query "Stacks[0].Outputs[?OutputKey=='UserPoolClientId'].OutputValue" \
+            --output text)
+
+          FRONTEND_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name ${STACK_NAME} \
+            --region ${AWS_REGION} \
+            --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" \
+            --output text)
+
+          FRONTEND_URL=$(aws cloudformation describe-stacks \
+            --stack-name ${STACK_NAME} \
+            --region ${AWS_REGION} \
+            --query "Stacks[0].Outputs[?OutputKey=='FrontendUrl'].OutputValue" \
+            --output text)
+
+          echo "api_endpoint=${API_ENDPOINT}" >> $GITHUB_OUTPUT
+          echo "user_pool_id=${USER_POOL_ID}" >> $GITHUB_OUTPUT
+          echo "user_pool_client_id=${USER_POOL_CLIENT_ID}" >> $GITHUB_OUTPUT
+          echo "frontend_bucket=${FRONTEND_BUCKET}" >> $GITHUB_OUTPUT
+          echo "frontend_url=${FRONTEND_URL}" >> $GITHUB_OUTPUT
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          VITE_API_ENDPOINT: ${{ steps.stack-outputs.outputs.api_endpoint }}
+          VITE_USER_POOL_ID: ${{ steps.stack-outputs.outputs.user_pool_id }}
+          VITE_USER_POOL_CLIENT_ID: ${{ steps.stack-outputs.outputs.user_pool_client_id }}
+          VITE_REGION: ${{ env.AWS_REGION }}
+        run: npm run build
+
+      - name: Deploy frontend to S3
+        run: |
+          aws s3 sync frontend/dist/ s3://${{ steps.stack-outputs.outputs.frontend_bucket }}/ \
+            --region ${AWS_REGION} \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable"
+
+      - name: Invalidate CloudFront cache
+        run: |
+          DISTRIBUTION_ID=$(aws cloudfront list-distributions \
+            --query "DistributionList.Items[?Origins.Items[?DomainName=='${{ steps.stack-outputs.outputs.frontend_bucket }}.s3.${AWS_REGION}.amazonaws.com']].Id" \
+            --output text)
+
+          if [ ! -z "$DISTRIBUTION_ID" ]; then
+            aws cloudfront create-invalidation \
+              --distribution-id ${DISTRIBUTION_ID} \
+              --paths "/*" \
+              --no-cli-pager
+          fi
+
+      - name: Deployment Summary
+        run: |
+          echo "## 🚀 Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🌐 Application URLs" >> $GITHUB_STEP_SUMMARY
+          echo "- **Frontend:** ${{ steps.stack-outputs.outputs.frontend_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **API:** ${{ steps.stack-outputs.outputs.api_endpoint }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔐 Cognito Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **User Pool ID:** ${{ steps.stack-outputs.outputs.user_pool_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Client ID:** ${{ steps.stack-outputs.outputs.user_pool_client_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ℹ️ Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "1. Visit the frontend URL" >> $GITHUB_STEP_SUMMARY
+          echo "2. Sign up for a new account" >> $GITHUB_STEP_SUMMARY
+          echo "3. Verify your email" >> $GITHUB_STEP_SUMMARY
+          echo "4. Start chatting!" >> $GITHUB_STEP_SUMMARY
